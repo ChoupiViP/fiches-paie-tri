@@ -8,7 +8,9 @@ Petit programme **100 % local** qui lit des fiches de paie en PDF (numériques, 
 
 - Lit les fiches de paie de plusieurs mises en page différentes (agences d'intérim, petites entreprises, etc.).
 - Copie chaque fiche dans `2024/`, `2025/`… sous la forme `2025-10_Employeur.pdf`.
-- Produit un tableau Excel avec 4 onglets :
+- Produit une **fiche de report** (page à ouvrir ou imprimer) : pour chaque année, le montant à recopier dans la case « traitements et salaires » de la déclaration de revenus (**1AJ** pour le déclarant 1, **1BJ** pour le conjoint, **1CJ** / **1DJ** pour les personnes à charge), avec un indicateur de fiabilité par année.
+- Produit un tableau Excel avec 5 onglets :
+  - **Aide déclaration** : la même chose que la fiche de report, avec le détail par employeur ;
   - **Récap annuel** : net imposable total par année et par employeur, comparé au cumul indiqué sur la dernière fiche quand il est lisible ;
   - **Détail** : une ligne par fiche (brut, net imposable, net à payer…) ;
   - **Mois manquants** : les mois sans fiche entre la première et la dernière fiche d'un employeur ;
@@ -16,7 +18,8 @@ Petit programme **100 % local** qui lit des fiches de paie en PDF (numériques, 
 
 ## Ce que ça ne fait pas
 
-- Il **ne remplit pas** la déclaration et ne se connecte pas à impots.gouv.fr : il donne les chiffres, c'est à vous de les reporter.
+- Il **ne remplit pas** la déclaration (papier ou en ligne) et ne se connecte pas à impots.gouv.fr : il prépare la fiche de report, c'est à vous de recopier les montants.
+- Il ne calcule pas les frais réels (case 1AK), les allocations chômage (1AP) ni les pensions (1AS), et ne tient pas compte des exonérations particulières (apprentis, étudiants…).
 - Il **ne lit pas les scans ou photos** (pas d'OCR) : ils sont mis de côté dans « À vérifier ».
 - Ce n'est **pas un conseil fiscal**. Vérifiez toujours les montants : comparez avec le cumul de la dernière fiche de l'année et avec les revenus déjà pré-remplis sur votre déclaration ou votre espace impots.gouv.fr. Pour une situation en retard, le service des impôts (SIP) peut vous indiquer la marche à suivre.
 
@@ -24,8 +27,9 @@ Petit programme **100 % local** qui lit des fiches de paie en PDF (numériques, 
 
 1. Dans l'onglet **Releases** de ce dépôt GitHub, téléchargez `TriFichesPaie.exe`.
 2. Double-cliquez dessus. Windows peut afficher un avertissement « SmartScreen » car le programme n'est pas signé : cliquez sur *Informations complémentaires* puis *Exécuter quand même*. Le code source est visible ici si vous voulez vérifier.
-3. Cliquez sur **Parcourir…**, choisissez le dossier qui contient vos fiches de paie (les sous-dossiers sont lus aussi), puis **Lancer le tri**.
-4. À la fin, cliquez sur **Ouvrir le tableau Excel**.
+3. Cliquez sur **Parcourir…**, choisissez le dossier qui contient les fiches de paie (les sous-dossiers sont lus aussi), indiquez de qui sont ces fiches (déclarant 1, conjoint…), puis **Lancer le tri**.
+4. À la fin, cliquez sur **Ouvrir la fiche de report** : c'est la page à avoir sous les yeux en remplissant la déclaration. Le tableau Excel donne le détail.
+5. Si une année est marquée **À vérifier**, regardez pourquoi (mois sans fiche, écart avec le cumul…) avant de recopier le montant.
 
 À chaque lancement, un nouveau dossier `Fiches_de_paie_triees_<date>` est créé : rien n'est écrasé.
 
@@ -35,6 +39,7 @@ Petit programme **100 % local** qui lit des fiches de paie en PDF (numériques, 
 pip install -r requirements.txt
 python app.py                                   # version avec fenêtre
 python trier_fiches_paie.py "C:\mes\fiches" -o resultat   # en ligne de commande
+python trier_fiches_paie.py "C:\mes\fiches" -o resultat --declarant 2   # fiches du conjoint (case 1BJ)
 ```
 
 ## Si une fiche est mal lue (mise en page inconnue)
