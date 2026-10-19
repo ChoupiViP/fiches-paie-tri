@@ -1,0 +1,14 @@
+*.pdf
+*.xlsx
+*.xls
+*.csv
+Fiches_de_paie_triees_*/
+tri_fiches/
+resultat/
+debug/
+patterns.json
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
