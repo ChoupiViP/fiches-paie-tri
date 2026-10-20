@@ -8,7 +8,11 @@ Petit programme **100 % local** qui lit des fiches de paie en PDF (numériques, 
 
 - Lit les fiches de paie de plusieurs mises en page différentes (agences d'intérim, petites entreprises, etc.).
 - Copie chaque fiche dans `2024/`, `2025/`… sous la forme `2025-10_Employeur.pdf`.
-- Produit une **fiche de report** (page à ouvrir ou imprimer) : pour chaque année, le montant à recopier dans la case « traitements et salaires » de la déclaration de revenus (**1AJ** pour le déclarant 1, **1BJ** pour le conjoint, **1CJ** / **1DJ** pour les personnes à charge), avec un indicateur de fiabilité par année.
+- Produit une **fiche de report** (page à ouvrir ou imprimer) : pour chaque année, les montants à recopier sur la déclaration de revenus (formulaire 2042), avec un indicateur de fiabilité :
+  - **1AJ** : traitements et salaires (net imposable) — **1BJ** pour le conjoint, **1CJ** / **1DJ** pour les personnes à charge ;
+  - **8HV** : prélèvement à la source déjà payé (colonne « Impôt prélevé » des bulletins) — 8IV, 8JV, 8KV selon la personne ;
+  - **1GH** : heures supplémentaires exonérées (colonne « HS/HC exonér »), seulement s'il y en a — 1HH, 1IH, 1JH selon la personne.
+  Ces numéros sont ceux du formulaire des revenus 2023 : vérifiez-les sur le formulaire de chaque année.
 - Produit un tableau Excel avec 5 onglets :
   - **Aide déclaration** : la même chose que la fiche de report, avec le détail par employeur ;
   - **Récap annuel** : net imposable total par année et par employeur, comparé au cumul indiqué sur la dernière fiche quand il est lisible ;

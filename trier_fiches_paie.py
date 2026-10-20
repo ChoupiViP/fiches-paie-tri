@@ -36,6 +36,7 @@ import json
 import re
 import shutil
 import sys
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
@@ -79,6 +80,10 @@ PATTERNS_DEFAUT = {
         r"net\s+pay[ée]",
         r"net\s+vers[ée]",
     ],
+    # ligne du bulletin donnant l'impôt prélevé à la source (dernier montant de la ligne retenu)
+    "impot_preleve": [
+        r"imp[oô]t\s+sur\s+le\s+revenu\s+pr[ée]lev[ée]",
+    ],
     # employeur : motifs avec un groupe capturant le nom
     "employeur": [
         # « : » ou tiret suivi d'une espace (pas un signe moins collé à un montant)
@@ -111,6 +116,28 @@ CASES_DECLARANT = {
     "3": ("Personne à charge 1", "1CJ"),
     "4": ("Personne à charge 2", "1DJ"),
 }
+# Autres cases utiles (formulaire 2042 revenus 2023) : heures supplémentaires exonérées et
+# retenue à la source sur les salaires (prélèvement à la source déjà payé).
+CASES_AUTRES = {
+    "1": {"hs": "1GH", "pas": "8HV"},
+    "2": {"hs": "1HH", "pas": "8IV"},
+    "3": {"hs": "1IH", "pas": "8JV"},
+    "4": {"hs": "1JH", "pas": "8KV"},
+}
+
+# Colonnes lues dans le tableau « Cumuls » des bulletins : (1er mot, début du 2e mot) du titre,
+# sans accents ni majuscules.
+COLONNES_CUMULS = {
+    "net_imposable": ("net", "imposable"),
+    "impot_preleve": ("impot", "prelev"),
+    "hs_exonerees": ("hs/hc", "exoner"),
+}
+
+
+def cases_pour(declarant):
+    """Toutes les cases à utiliser pour une personne : libellé, salaires, hs, pas."""
+    libelle, salaires = CASES_DECLARANT[str(declarant)]
+    return {"libelle": libelle, "salaires": salaires, **CASES_AUTRES[str(declarant)]}
 
 SEP_MILLIERS = r"[ \u00a0\u202f.]"
 MONTANT = re.compile(
@@ -293,42 +320,59 @@ def _regrouper_montants(mots):
     return sortie
 
 
-def extraire_tableau_cumuls(pdf_path, tolerance=6):
-    """Lit le net imposable dans un tableau « Cumuls » : le titre de colonne est sur une
-    ligne et les montants sur les lignes « Mensuel » / « Annuel » en dessous. Les montants
-    sont rattachés au titre par leur position horizontale sur la page.
+def _norm(texte):
+    """Minuscules sans accents, pour comparer des libellés."""
+    return unicodedata.normalize("NFD", texte.lower()).encode("ascii", "ignore").decode()
 
-    Retourne {"mois": montant du mois, "cumul": montant cumulé}, clés absentes si introuvable.
+
+def _abs(x):
+    return None if x is None else abs(x)
+
+
+def extraire_tableau_cumuls(pdf_path, tolerance=6):
+    """Lit les colonnes du tableau « Cumuls » d'un bulletin (net imposable, impôt prélevé,
+    heures supplémentaires exonérées) : le titre de colonne est sur une ligne et les montants
+    sur les lignes « Mensuel » / « Annuel » en dessous. Les montants sont rattachés au titre
+    par leur position horizontale sur la page.
+
+    Retourne {"net_imposable": {"mois": x, "cumul": y}, "impot_preleve": {...},
+    "hs_exonerees": {...}}. Les colonnes ou les valeurs introuvables sont absentes.
     """
     res = {}
     roles = {"mensuel": "mois", "mois": "mois", "courant": "mois", "mensuelle": "mois",
-             "annuel": "cumul", "annuelle": "cumul", "cumul": "cumul", "cumulé": "cumul",
-             "cumule": "cumul", "cumuls": "cumul"}
+             "annuel": "cumul", "annuelle": "cumul", "cumul": "cumul", "cumule": "cumul",
+             "cumuls": "cumul"}
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
                 lignes = _lignes_de_mots(page.extract_words())
                 for i, ligne in enumerate(lignes):
-                    textes = [w["text"].lower() for w in ligne]
-                    pos = next((j for j in range(len(ligne) - 1)
-                                if textes[j] == "net" and textes[j + 1].startswith("imposable")), None)
-                    if pos is None:
-                        continue
-                    x0, x1 = ligne[pos]["x0"], ligne[pos + 1]["x1"]
-                    for suivante in lignes[i + 1:i + 7]:
-                        role = roles.get(suivante[0]["text"].lower().strip(":"))
-                        if role is None or role in res:
+                    textes = [_norm(w["text"]) for w in ligne]
+                    for cle, (mot1, mot2) in COLONNES_CUMULS.items():
+                        if cle in res:
                             continue
-                        meilleur, meilleur_ov = None, 0
-                        for w in _regrouper_montants(suivante[1:]):
-                            if not MONTANT.fullmatch(w["text"]):
+                        pos = next((j for j in range(len(ligne) - 1)
+                                    if textes[j] == mot1 and textes[j + 1].startswith(mot2)), None)
+                        if pos is None:
+                            continue
+                        x0, x1 = ligne[pos]["x0"], ligne[pos + 1]["x1"]
+                        trouve = {}
+                        for suivante in lignes[i + 1:i + 7]:
+                            role = roles.get(_norm(suivante[0]["text"]).strip(":"))
+                            if role is None or role in trouve:
                                 continue
-                            ov = min(w["x1"], x1 + tolerance) - max(w["x0"], x0 - tolerance)
-                            if ov > meilleur_ov:
-                                meilleur, meilleur_ov = w, ov
-                        if meilleur is not None:
-                            res[role] = en_nombre(meilleur["text"])
-                    if res:
+                            meilleur, meilleur_ov = None, 0
+                            for w in _regrouper_montants(suivante[1:]):
+                                if not MONTANT.fullmatch(w["text"]):
+                                    continue
+                                ov = min(w["x1"], x1 + tolerance) - max(w["x0"], x0 - tolerance)
+                                if ov > meilleur_ov:
+                                    meilleur, meilleur_ov = w, ov
+                            if meilleur is not None:
+                                trouve[role] = en_nombre(meilleur["text"])
+                        if trouve:
+                            res[cle] = trouve
+                    if len(res) == len(COLONNES_CUMULS):
                         return res
     except Exception:  # PDF inhabituel : on laisse les autres méthodes de lecture
         return res
@@ -360,13 +404,26 @@ def analyser(pdf_path, dossier_debug=None):
     vc = chercher_montants(lignes, PATTERNS["cumul_net_imposable"])
     res["cumul"] = vc[-1] if vc else None
 
-    # 2e méthode : tableau « Cumuls » (titre de colonne + lignes Mensuel / Annuel)
-    if res["net_imposable"] is None or res["cumul"] is None:
-        tableau = extraire_tableau_cumuls(pdf_path)
-        if res["net_imposable"] is None:
-            res["net_imposable"] = tableau.get("mois")
-        if res["cumul"] is None:
-            res["cumul"] = tableau.get("cumul")
+    # tableau « Cumuls » (titre de colonne + lignes Mensuel / Annuel) : net imposable si non
+    # trouvé ailleurs, et aussi impôt prélevé à la source et heures supplémentaires exonérées
+    tableau = extraire_tableau_cumuls(pdf_path)
+    ni = tableau.get("net_imposable", {})
+    if res["net_imposable"] is None:
+        res["net_imposable"] = ni.get("mois")
+    if res["cumul"] is None:
+        res["cumul"] = ni.get("cumul")
+    pas = tableau.get("impot_preleve", {})
+    res["impot_preleve"] = _abs(pas.get("mois"))
+    res["impot_preleve_cumul"] = _abs(pas.get("cumul"))
+    hs = tableau.get("hs_exonerees", {})
+    res["hs_exonerees"] = _abs(hs.get("mois"))
+    res["hs_exonerees_cumul"] = _abs(hs.get("cumul"))
+    if res["impot_preleve"] is None:
+        # à défaut : dernier montant de la ligne « Impôt sur le revenu prélevé à la source »
+        vi = chercher_montants(lignes, PATTERNS["impot_preleve"])
+        if vi:
+            res["impot_preleve"] = abs(vi[-1])
+            res["avert"].append("impôt prélevé lu sur la ligne du bulletin (à vérifier)")
 
     if res["net_imposable"] is None:
         res["avert"].append("net imposable non trouvé")
@@ -401,9 +458,9 @@ def calculer_mois_manquants(par_cle):
     return manques
 
 
-def rappels(case):
-    """Rappels affichés avec la fiche de report. `case` ex. '1AJ' -> lettre 'A'."""
-    p = case[1]
+def rappels(cases):
+    """Rappels affichés avec la fiche de report. `cases` : résultat de cases_pour()."""
+    p = cases["salaires"][1]          # '1AJ' -> lettre 'A' (déclarant 1), 'B', 'C' ou 'D'
     return [
         "Si la déclaration est préremplie, compare avec ces montants. Si le montant prérempli est "
         "inexact, il faut le barrer et inscrire le montant exact dans la case.",
@@ -411,6 +468,12 @@ def rappels(case):
         "comprises dans le net imposable des fiches.",
         "En principe, un revenu se déclare l'année où il a été versé : une paie de décembre versée en "
         "janvier peut relever de l'année suivante.",
+        f"Prélèvement à la source (case {cases['pas']}) : c'est l'impôt déjà retenu sur les bulletins "
+        "(colonne « Impôt prélevé »). D'après la notice des impôts, s'il est omis il n'est pas déduit "
+        "de l'impôt dû. Cette case est souvent préremplie : compare, et corrige si c'est inexact.",
+        f"Heures supplémentaires exonérées (case {cases['hs']}) : montant lu dans la colonne « HS/HC "
+        "exonér » des bulletins. La notice indique que la fraction exonérée se déclare dans cette case ; "
+        "vérifie dans la notice de l'année si elle doit rester ou non dans la case des salaires.",
         f"Non calculés ici : frais réels (case 1{p}K), allocations chômage (case 1{p}P), "
         f"pensions et retraites (case 1{p}S).",
         "Apprentis et étudiants : une partie du salaire peut être exonérée (voir la notice des impôts).",
@@ -420,8 +483,32 @@ def rappels(case):
     ]
 
 
-def ecrire_html(chemin, libelle, case, annees, avert_globaux, lignes_rappels):
+def lignes_de_report(annees, cases):
+    """Une ligne par (année, case) : ce que la personne doit recopier sur sa déclaration."""
+    lignes = []
+    for an in sorted(annees):
+        d = annees[an]
+        lignes.append({"annee": an, "case": cases["salaires"],
+                       "intitule": "Traitements et salaires (net imposable)",
+                       "total": d["total"], "nb": d["nb"], "raisons": list(d["raisons"])})
+        for cle, intitule, toujours in (
+                ("hs", "Heures supplémentaires exonérées (voir « À savoir »)", False),
+                ("pas", "Prélèvement à la source déjà payé (retenue sur salaires)", True)):
+            m = d[cle]
+            if not (toujours or m["total"] > 0 or m["non_lus"]):
+                continue
+            raisons = list(m["raisons"])
+            if m["non_lus"]:
+                raisons.append(f"non lu sur {m['non_lus']} fiche(s) : à reprendre à la main "
+                               "sur les bulletins")
+            lignes.append({"annee": an, "case": cases[cle], "intitule": intitule,
+                           "total": m["total"], "nb": d["nb"], "raisons": raisons})
+    return lignes
+
+
+def ecrire_html(chemin, cases, lignes, annees, avert_globaux, lignes_rappels):
     h = html.escape
+    libelle, case = cases["libelle"], cases["salaires"]
     parts = [
         "<!doctype html><html lang='fr'><head><meta charset='utf-8'>",
         "<title>Fiche de report - déclaration de revenus</title>",
@@ -433,23 +520,26 @@ def ecrire_html(chemin, libelle, case, annees, avert_globaux, lignes_rappels):
         ".alerte{background:#fff4e5;border:1px solid #e0a040;padding:.6rem .8rem;margin:.5rem 0}"
         "@media print{body{margin:0}}</style></head><body>",
         "<h1>Fiche de report pour la déclaration de revenus</h1>",
-        f"<p>Personne concernée : <b>{h(libelle)}</b> &mdash; case « traitements et salaires » : "
-        f"<span class='case'>{h(case)}</span></p>",
+        f"<p>Personne concernée : <b>{h(libelle)}</b> &mdash; cases à remplir : "
+        f"<span class='case'>{h(case)}</span> (salaires), "
+        f"<span class='case'>{h(cases['pas'])}</span> (prélèvement à la source), "
+        f"<span class='case'>{h(cases['hs'])}</span> (heures supplémentaires exonérées, si besoin)</p>",
     ]
     for a in avert_globaux:
         parts.append(f"<div class='alerte'>{h(a)}</div>")
-    parts.append("<table><tr><th>Année des revenus</th><th>Case</th><th>Montant à reporter (€)</th>"
-                 "<th>Montant exact (€)</th><th>Fiches</th><th>Fiabilité</th></tr>")
-    for an in sorted(annees):
-        d = annees[an]
-        ok = not d["raisons"]
+    parts.append("<table><tr><th>Année des revenus</th><th>Case</th><th>Intitulé</th>"
+                 "<th>Montant à reporter (€)</th><th>Montant exact (€)</th><th>Fiches</th>"
+                 "<th>Fiabilité</th></tr>")
+    for l in lignes:
+        ok = not l["raisons"]
         etat = "<span class='ok'>OK</span>" if ok else "<span class='ko'>À vérifier</span>"
         parts.append(
-            f"<tr><td>{an}</td><td>{h(case)}</td><td class='n'><b>{format_euro(arrondi_euro(d['total']))}</b></td>"
-            f"<td class='n'>{format_euro(d['total'], 2)}</td><td>{d['nb']}</td><td>{etat}</td></tr>")
+            f"<tr><td>{l['annee']}</td><td><b>{h(l['case'])}</b></td><td>{h(l['intitule'])}</td>"
+            f"<td class='n'><b>{format_euro(arrondi_euro(l['total']))}</b></td>"
+            f"<td class='n'>{format_euro(l['total'], 2)}</td><td>{l['nb']}</td><td>{etat}</td></tr>")
         if not ok:
-            parts.append("<tr><td colspan='6'><ul>" +
-                         "".join(f"<li>{h(r)}</li>" for r in d["raisons"]) + "</ul></td></tr>")
+            parts.append("<tr><td colspan='7'><ul>" +
+                         "".join(f"<li>{h(r)}</li>" for r in l["raisons"]) + "</ul></td></tr>")
     parts.append("</table><h2>Détail par employeur</h2><table><tr><th>Année</th><th>Employeur</th>"
                  "<th>Fiches</th><th>Net imposable (€)</th></tr>")
     for an in sorted(annees):
@@ -474,6 +564,7 @@ def traiter(dossier, sortie="tri_fiches", debug=False, log=print, declarant="1")
     if declarant not in CASES_DECLARANT:
         raise ValueError("Le déclarant doit être 1, 2, 3 ou 4.")
     libelle, case = CASES_DECLARANT[declarant]
+    cases = cases_pour(declarant)
 
     charger_patterns_perso(log)
     src = Path(dossier)
@@ -545,7 +636,24 @@ def traiter(dossier, sortie="tri_fiches", debug=False, log=print, declarant="1")
         cumul = max(cumuls)[1] if cumuls else None
         ecart = round(cumul - somme, 2) if cumul is not None else None
         rem = []
-        d = annees.setdefault(an, {"total": 0.0, "nb": 0, "employeurs": [], "raisons": []})
+        d = annees.setdefault(an, {
+            "total": 0.0, "nb": 0, "employeurs": [], "raisons": [],
+            "hs": {"total": 0.0, "non_lus": 0, "raisons": []},     # heures sup. exonérées
+            "pas": {"total": 0.0, "non_lus": 0, "raisons": []},    # prélèvement à la source
+        })
+        # impôt prélevé et heures supplémentaires exonérées : mêmes contrôles que le net imposable
+        for cle, cle_val, cle_cumul in (("pas", "impot_preleve", "impot_preleve_cumul"),
+                                        ("hs", "hs_exonerees", "hs_exonerees_cumul")):
+            valeurs = [f.get(cle_val) for f in fiches]
+            s = sum(v for v in valeurs if v is not None)
+            cumuls_m = [(f["mois"], f[cle_cumul]) for f in fiches if f.get(cle_cumul) is not None]
+            cumul_m = max(cumuls_m)[1] if cumuls_m else None
+            m = d[cle]
+            m["total"] += s
+            m["non_lus"] += sum(1 for v in valeurs if v is None)
+            if cumul_m is not None and abs(cumul_m - s) > 1:
+                m["raisons"].append(f"{emp} : écart de {format_euro(cumul_m - s, 2)} € avec le "
+                                    "cumul de la dernière fiche")
         d["total"] += somme
         d["nb"] += len(fiches)
         d["employeurs"].append((emp, somme, len(fiches)))
@@ -566,7 +674,8 @@ def traiter(dossier, sortie="tri_fiches", debug=False, log=print, declarant="1")
         avert_globaux.append(
             f"{nb_non_classees} fiche(s) n'ont pas pu être classées (dossier « A_verifier ») : "
             "leurs montants ne sont pas dans les totaux ci-dessous.")
-    rappels_txt = rappels(case)
+    rappels_txt = rappels(cases)
+    lignes = lignes_de_report(annees, cases)
 
     wb = Workbook()
     gras = Font(bold=True)
@@ -576,19 +685,20 @@ def traiter(dossier, sortie="tri_fiches", debug=False, log=print, declarant="1")
     wa.title = "Aide déclaration"
     wa.append(["Aide au remplissage de la déclaration de revenus (à vérifier avant de recopier)"])
     wa.cell(wa.max_row, 1).font = Font(bold=True, size=13)
-    wa.append([f"Personne concernée : {libelle} — case « traitements et salaires » : {case}"])
+    wa.append([f"Personne concernée : {libelle} — cases : {cases['salaires']} (salaires), "
+               f"{cases['pas']} (prélèvement à la source), {cases['hs']} (heures sup. exonérées)"])
     for a in avert_globaux:
         wa.append([f"ATTENTION : {a}"])
         wa.cell(wa.max_row, 1).font = gras
     wa.append([])
-    wa.append(["Année des revenus", "Case", "Montant à reporter (€, arrondi)",
+    wa.append(["Année des revenus", "Case", "Intitulé", "Montant à reporter (€, arrondi)",
                "Montant exact (€)", "Nb de fiches", "Fiabilité", "À vérifier"])
     for c in wa[wa.max_row]:
         c.font = gras
-    for an in sorted(annees):
-        d = annees[an]
-        wa.append([an, case, arrondi_euro(d["total"]), round(d["total"], 2), d["nb"],
-                   "OK" if not d["raisons"] else "À vérifier", " ; ".join(d["raisons"])])
+    for l in lignes:
+        wa.append([l["annee"], l["case"], l["intitule"], arrondi_euro(l["total"]),
+                   round(l["total"], 2), l["nb"], "OK" if not l["raisons"] else "À vérifier",
+                   " ; ".join(l["raisons"])])
     wa.append([])
     wa.append(["Détail par employeur"])
     wa.cell(wa.max_row, 1).font = gras
@@ -619,11 +729,13 @@ def traiter(dossier, sortie="tri_fiches", debug=False, log=print, declarant="1")
 
     wd = wb.create_sheet("Détail")
     wd.append(["Fichier d'origine", "Classé dans", "Année", "Mois", "Employeur", "Brut",
-               "Net imposable", "Net à payer", "Cumul net imposable", "Avertissements"])
+               "Net imposable", "Net à payer", "Cumul net imposable", "Impôt prélevé",
+               "HS exonérées", "Avertissements"])
     for r in sorted(resultats, key=lambda x: (x.get("annee") or 0, x.get("mois") or 0)):
         wd.append([r["fichier"].name, str(r["classe_dans"].relative_to(out)), r.get("annee"),
                    r.get("mois"), r.get("employeur"), r.get("brut"), r.get("net_imposable"),
-                   r.get("net_a_payer"), r.get("cumul"), " ; ".join(r["avert"])])
+                   r.get("net_a_payer"), r.get("cumul"), r.get("impot_preleve"),
+                   r.get("hs_exonerees"), " ; ".join(r["avert"])])
 
     wm = wb.create_sheet("Mois manquants")
     wm.append(["Employeur", "Année", "Mois sans fiche (entre la 1re et la dernière fiche)"])
@@ -655,16 +767,16 @@ def traiter(dossier, sortie="tri_fiches", debug=False, log=print, declarant="1")
     chemin_xlsx = out / "recapitulatif_fiches_paie.xlsx"
     wb.save(chemin_xlsx)
     chemin_html = out / "fiche_de_report_declaration.html"
-    ecrire_html(chemin_html, libelle, case, annees, avert_globaux, rappels_txt)
+    ecrire_html(chemin_html, cases, lignes, annees, avert_globaux, rappels_txt)
 
     nb_ok = sum(1 for r in resultats if r.get("annee") and r.get("net_imposable") is not None)
     log(f"{len(pdfs)} PDF trouvés, {len(doublons)} doublon(s) ignoré(s), "
         f"{nb_ok}/{len(resultats)} fiches lues complètement.")
-    log(f"À reporter dans la case {case} ({libelle}) :")
-    for an in sorted(annees):
-        d = annees[an]
-        etat = "" if not d["raisons"] else "  ← À VÉRIFIER"
-        log(f"  {an} : {format_euro(arrondi_euro(d['total']))} €{etat}")
+    log(f"À reporter ({libelle}) :")
+    for l in lignes:
+        etat = "" if not l["raisons"] else "  ← À VÉRIFIER"
+        log(f"  {l['annee']} — case {l['case']} ({l['intitule']}) : "
+            f"{format_euro(arrondi_euro(l['total']))} €{etat}")
     log(f"Fiche de report : {chemin_html}")
     log(f"Tableau complet : {chemin_xlsx}")
     log("IMPORTANT : vérifie ces montants (cumul de la dernière fiche de l'année, revenus déjà "
@@ -673,7 +785,7 @@ def traiter(dossier, sortie="tri_fiches", debug=False, log=print, declarant="1")
     return {
         "xlsx": chemin_xlsx, "html": chemin_html, "sortie": out, "nb_pdf": len(pdfs),
         "doublons": len(doublons), "lues": nb_ok, "a_verifier": nb_verif + len(doublons),
-        "totaux": totaux_annee, "case": case, "aide": annees,
+        "totaux": totaux_annee, "case": case, "cases": cases, "aide": annees, "lignes": lignes,
     }
 
 
