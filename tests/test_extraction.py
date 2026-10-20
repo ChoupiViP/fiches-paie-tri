@@ -24,9 +24,18 @@ def test_cases_declarant():
     assert c.CASES_DECLARANT["4"][1] == "1DJ"
 
 
+def test_autres_cases_declarant():
+    assert c.cases_pour("1") == {"libelle": "Déclarant 1", "salaires": "1AJ", "hs": "1GH", "pas": "8HV"}
+    assert c.cases_pour("2")["hs"] == "1HH" and c.cases_pour("2")["pas"] == "8IV"
+    assert c.cases_pour("3")["hs"] == "1IH" and c.cases_pour("3")["pas"] == "8JV"
+    assert c.cases_pour("4")["hs"] == "1JH" and c.cases_pour("4")["pas"] == "8KV"
+
+
 def test_rappels_suivent_la_personne():
-    assert "1AK" in " ".join(c.rappels("1AJ"))
-    assert "1BK" in " ".join(c.rappels("1BJ"))
+    texte1 = " ".join(c.rappels(c.cases_pour("1")))
+    assert "1AK" in texte1 and "8HV" in texte1 and "1GH" in texte1
+    texte2 = " ".join(c.rappels(c.cases_pour("2")))
+    assert "1BK" in texte2 and "8IV" in texte2 and "1HH" in texte2
 
 
 def test_montants_ligne():
@@ -123,9 +132,11 @@ def test_employeur_ignore_les_montants():
     assert c.detecter_employeur(texte, texte.splitlines()) == "Job & Box"
 
 
-def _pdf_tableau_cumuls(chemin):
+def _pdf_tableau_cumuls(chemin, debut="28/09/2026", fin="30/09/2026", net=("222,95", "1 456,78"),
+                        impot=("18,50", "18,50"), hs=("12,00", "12,00")):
     """Fiche d'intérim fictive avec un tableau « Cumuls » : titres sur une ligne,
-    montants alignés à droite sous chaque titre, lignes Mensuel / Annuel."""
+    montants alignés à droite sous chaque titre, lignes Mensuel / Annuel.
+    net, impot, hs : (valeur du mois, valeur annuelle) écrites dans les colonnes correspondantes."""
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     cv = canvas.Canvas(str(chemin), pagesize=A4)
@@ -133,7 +144,7 @@ def _pdf_tableau_cumuls(chemin):
     haut = [
         (40, "JOB & BOX"),
         (40, "BULLETIN DE PAYE"),
-        (40, "Période de paye du 28/09/2026 au 30/09/2026"),
+        (40, f"Période de paye du {debut} au {fin}"),
         (40, "Autres contributions dues par l'employeur -14,62"),
         (40, "Total Brut total * 273,28"),
         (40, "Total NET A PAYER AVANT IMPOTS SUR LE REVENU 215,13"),
@@ -145,11 +156,12 @@ def _pdf_tableau_cumuls(chemin):
     cv.setFont("Helvetica", 5)   # petite police, comme sur une vraie fiche : titres de colonnes serrés
     y = 200
     for x, titre in [(40, "Cumuls"), (75, "Hrs travaillées"), (121, "Salaire brut"), (165, "Brut abattu"),
-                     (252, "Tranche 1"), (295, "Tranche 2"), (332, "Net imposable"), (376, "Impôt prélevé")]:
+                     (252, "Tranche 1"), (295, "Tranche 2"), (332, "Net imposable"), (376, "Impôt prélevé"),
+                     (417, "HS/HC exonér"), (456, "Allèg. cot. employeur")]:
         cv.drawString(x, y, titre)
-    colonnes_droite = [110, 153, 196, 282, 325, 368, 410]
-    lignes = [("Mensuel", ["22,20", "273,28", "273,28", "273,28", "0,00", "222,95", "0,00"]),
-              ("Annuel", ["22,20", "1 273,28", "1 273,28", "1 273,28", "0,00", "1 456,78", "0,00"])]
+    colonnes_droite = [110, 153, 196, 282, 325, 368, 410, 451]
+    lignes = [("Mensuel", ["22,20", "273,28", "273,28", "273,28", "0,00", net[0], impot[0], hs[0]]),
+              ("Annuel", ["22,20", "1 273,28", "1 273,28", "1 273,28", "0,00", net[1], impot[1], hs[1]])]
     for nom, valeurs in lignes:
         y -= 12
         cv.drawString(40, y, nom)
@@ -162,7 +174,11 @@ def test_tableau_cumuls(tmp_path):
     pytest.importorskip("reportlab")
     pdf = tmp_path / "fiche.pdf"
     _pdf_tableau_cumuls(pdf)
-    assert c.extraire_tableau_cumuls(pdf) == {"mois": 222.95, "cumul": 1456.78}
+    assert c.extraire_tableau_cumuls(pdf) == {
+        "net_imposable": {"mois": 222.95, "cumul": 1456.78},
+        "impot_preleve": {"mois": 18.5, "cumul": 18.5},
+        "hs_exonerees": {"mois": 12.0, "cumul": 12.0},
+    }
 
 
 def test_analyse_fiche_avec_tableau_cumuls(tmp_path):
@@ -176,7 +192,55 @@ def test_analyse_fiche_avec_tableau_cumuls(tmp_path):
     assert r["cumul"] == 1456.78
     assert r["net_a_payer"] == 215.13
     assert r["brut"] == 273.28
+    assert r["impot_preleve"] == 18.5
+    assert r["hs_exonerees"] == 12.0
     assert r["avert"] == []
+
+
+def test_report_impot_preleve_et_hs(tmp_path):
+    """Deux bulletins du même employeur : les montants s'additionnent et sont contrôlés
+    avec le cumul annuel de la dernière fiche."""
+    pytest.importorskip("reportlab")
+    src = tmp_path / "pdf"
+    src.mkdir()
+    _pdf_tableau_cumuls(src / "sept.pdf", "01/09/2026", "30/09/2026",
+                        net=("1 000,00", "1 000,00"), impot=("18,50", "18,50"), hs=("12,00", "12,00"))
+    _pdf_tableau_cumuls(src / "oct.pdf", "01/10/2026", "31/10/2026",
+                        net=("1 100,00", "2 100,00"), impot=("20,00", "38,50"), hs=("0,00", "12,00"))
+    res = c.traiter(src, tmp_path / "out", log=lambda m: None)
+    par_case = {(l["annee"], l["case"]): l for l in res["lignes"]}
+    assert par_case[(2026, "1AJ")]["total"] == pytest.approx(2100.0)
+    assert par_case[(2026, "8HV")]["total"] == pytest.approx(38.5)
+    assert par_case[(2026, "1GH")]["total"] == pytest.approx(12.0)
+    for cle in ((2026, "1AJ"), (2026, "8HV"), (2026, "1GH")):
+        assert par_case[cle]["raisons"] == []
+    page = res["html"].read_text(encoding="utf-8")
+    assert "8HV" in page and "1GH" in page
+
+
+def test_impot_prelevé_incoherent_avec_le_cumul(tmp_path):
+    """Si la somme des fiches ne colle pas avec le cumul annuel, l'année est à vérifier."""
+    pytest.importorskip("reportlab")
+    src = tmp_path / "pdf"
+    src.mkdir()
+    _pdf_tableau_cumuls(src / "oct.pdf", "01/10/2026", "31/10/2026",
+                        net=("1 100,00", "1 100,00"), impot=("20,00", "58,50"), hs=("0,00", "0,00"))
+    res = c.traiter(src, tmp_path / "out", log=lambda m: None)
+    par_case = {(l["annee"], l["case"]): l for l in res["lignes"]}
+    assert par_case[(2026, "8HV")]["raisons"]          # écart avec le cumul signalé
+    assert (2026, "1GH") not in par_case                # aucune HS : pas de ligne inutile
+
+
+def test_colonnes_absentes_donnent_non_lu(tmp_path):
+    """Un bulletin sans tableau « Cumuls » : 8HV est signalé « non lu », pas à 0 en silence."""
+    pytest.importorskip("reportlab")
+    src = tmp_path / "pdf"
+    src.mkdir()
+    _pdf(src / "b1.pdf", ["Employeur : SARL Dupont Informatique", "Bulletin de salaire - mois de octobre 2025",
+                          "Total brut 2 100,50", "Net fiscal 1 650,25"])
+    res = c.traiter(src, tmp_path / "out", log=lambda m: None)
+    par_case = {(l["annee"], l["case"]): l for l in res["lignes"]}
+    assert any("non lu" in r for r in par_case[(2025, "8HV")]["raisons"])
 
 
 def test_declarant_invalide(tmp_path):
